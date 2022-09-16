@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Cross Entropy Algorithm 
 Python implementation of adaptive Importance Sampling by Cross Entropy 
@@ -15,7 +14,7 @@ import copy
 import openturns as ot
 
 ## Container of CE results
-class CEResult(ot.SimulationResult):
+class CrossEntropyResult(ot.SimulationResult):
     
     """
     Class providing results of Cross Entropy algorithm
@@ -89,9 +88,9 @@ class CEResult(ot.SimulationResult):
         return np.sqrt(self.varianceEstimate)/self.probabilityEstimate
         
 
-class GenericCrossEntropy(object):
+class ImportanceSamplingCrossEntropy(object):
     """
-    Virtual class for the Generic Cross Entropy algorithm
+    Virtual class for the Generic Importance Sampling by Cross Entropy algorithm
 
 
     Attributes
@@ -102,16 +101,23 @@ class GenericCrossEntropy(object):
 
     :event: Threshold event defining the reliability problem (:class:`~openturns.ThresholdEvent`)
     
-    :rhoQuantile: quantile level defining the intermediate thresholds (float)
+    :standardSpace: Boolean that indicates if the algorithm is performed in the standard space
     
-    :activeParameters: active parameters of auxiliary distribution (list of booleans)
+    :rhoQuantile: quantile level defining the intermediate thresholds (float)
+        
+    :activeParameters: active parameters of auxiliary distribution (list of integers)
+    
+    :initialAuxiliaryDistributionParameters: list of initial values of auxiliary distribution
+    
+    :bounds: bounds on auxiliary distribution variables to be optimized (only in physical space)
+    
+    :auxiliaryDistribution: auxiliaryDistribution family (only in physical space)
 
     """
-    def __init__(self,args):
+    def __init__(self,*args):
         
         self.numberOfAuxiliaryInputSample  = args[0] 
         self.maximalIterationNumber  = args[1] 
-
         self.event = args[2]
         self.limitStateFunction = self.event.getFunction() #limit state function
         self.eventThreshold = self.event.getThreshold() #Failure threshold
@@ -119,19 +125,53 @@ class GenericCrossEntropy(object):
         self.operator = self.event.getOperator() # event operator
         self.initialDistribution = self.event.getAntecedent().getDistribution() #initial distribution
         
+        self.isStandardSpace = args[3]
+        
         if self.operator(1,2)==True: 
-            self.rhoQuantile = args[3] #definition of rho quantile if exceedance failureProbabilitybility
+            self.rhoQuantile = args[4] #definition of rho quantile if exceedance failureProbabilitybility
         else:
-            self.rhoQuantile = 1 - args[3] #definition of rho quantile in case g<0
+            self.rhoQuantile = 1 - args[4] #definition of rho quantile in case g<0
 
-        self.activeParameters = np.array(args[4]) #active parameters
-        
-        self.failureProbability = 0.
-        
+        activeParameters_ = np.array(args[5]) #active parameters
+
+        self.probabilityEstimate = 0
+
+        self.initialAuxiliaryDistributionParameters = args[6] #initial values of the active parameters	
+            
 
         #copy of auxiliary distribution
         self.auxiliaryInputSamples = None # Current auxiliaryInputSamples
-        self.result = CEResult()
+        self.result = CrossEntropyResult()
+		
+		
+        if self.isStandardSpace == False : 
+		
+            self.bounds = args[7] #bounds of the active parameters
+
+            self.auxiliaryDistribution = copy.deepcopy(args[8])
+            self.auxiliaryDistributionOptimization = copy.deepcopy(args[8])
+        
+			#Check of active parameters list validity
+            #if len(self.activeParameters )!=len(self.auxiliaryDistribution.getParameter()):
+            #    raise ValueError('Wrong number of active parameters')
+				
+        else:
+            self.inverseIsoprobabilisticTransformation = self.initialDistribution.getInverseIsoProbabilisticTransformation()
+            self.initialDistributionPhysicalSpace = copy.deepcopy(self.initialDistribution)
+            self.initialDistribution = ot.ComposedDistribution([ot.Normal()]*self.sampleDimension)
+            self.auxiliaryDistribution = ot.ComposedDistribution([ot.Normal()]*self.sampleDimension)
+            
+            
+            
+        self.activeParameters = [False]*len(self.auxiliaryDistribution.getParameter())
+        for i in range(len(activeParameters_)):
+            self.activeParameters[activeParameters_[i]] = True 
+                  
+		#Check of validity of initial distribution parameter vector
+        if len(self.activeParameters)!=len(self.initialAuxiliaryDistributionParameters):
+            raise ValueError('Wrong correspondance between the number of active parameters and the given initial vector of parameters')
+     
+
 
         
     #Accessor to results
@@ -148,25 +188,36 @@ class GenericCrossEntropy(object):
         Method to estimate the probability of failure
         
         """        
-
         if self.operator(self.eventThreshold,self.eventThreshold+1) == True:
             eventThresholdLocal = ot.Point([self.eventThreshold+1])
         else: 
             eventThresholdLocal = ot.Point([self.eventThreshold-1])
 			
-        currentAuxiliaryDistributionParameters = self.initialAuxiliaryDistributionParameters
+        currentAuxiliaryDistributionParameters = np.array(self.initialAuxiliaryDistributionParameters)[self.activeParameters]
         iterationNumber  = 0
 		#main loop of adaptive importance sampling
         while self.operator(self.eventThreshold,eventThresholdLocal[0]) and iterationNumber < self.maximalIterationNumber:
             
-            #theta_courant = currentAuxiliaryDistributionParameters
-            self.updateAuxiliaryDistribution(currentAuxiliaryDistributionParameters)
-            auxiliaryInputSample= self.auxiliaryDistribution.getSample(self.numberOfAuxiliaryInputSample ) # drawing of auxiliaryInputSamples using auxiliary density
-            auxiliaryOutputSample = self.computeOutputSample(auxiliaryInputSample)
-            	
-            eventThresholdLocal = auxiliaryOutputSample.computeQuantile(self.rhoQuantile) #computation of current quantile
-            #print(eventThresholdLocal)
-            currentAuxiliaryDistributionParameters = self.optimizeParameters(auxiliaryInputSample,
+            if self.isStandardSpace == True :
+                self.updateAuxiliaryDistributionStandardSpace(currentAuxiliaryDistributionParameters)
+                auxiliaryInputSample= self.auxiliaryDistribution.getSample(self.numberOfAuxiliaryInputSample ) # drawing of auxiliaryInputSamples using auxiliary density
+                auxiliaryOutputSample = self.computeOutputSampleStandardSpace(auxiliaryInputSample)
+            else:
+                self.updateAuxiliaryDistributionPhysicalSpace(currentAuxiliaryDistributionParameters)
+                auxiliaryInputSample= self.auxiliaryDistribution.getSample(self.numberOfAuxiliaryInputSample ) # drawing of auxiliaryInputSamples using auxiliary density
+                auxiliaryOutputSample = self.computeOutputSamplePhysicalSpace(auxiliaryInputSample)	
+
+            eventThresholdLocal = auxiliaryOutputSample.computeQuantile(self.rhoQuantile) #computation of current quantile			
+			
+			
+            if self.isStandardSpace == True:
+
+                currentAuxiliaryDistributionParameters = self.optimizeParametersStandardSpace(auxiliaryInputSample,
+                                                                             auxiliaryOutputSample,
+                                                                             eventThresholdLocal,
+                                                                             currentAuxiliaryDistributionParameters)
+            else : 
+                currentAuxiliaryDistributionParameters = self.optimizeParametersPhysicalSpace(auxiliaryInputSample,
                                                                              auxiliaryOutputSample,
                                                                              eventThresholdLocal,
                                                                              currentAuxiliaryDistributionParameters)
@@ -176,7 +227,6 @@ class GenericCrossEntropy(object):
             print('WNG : maximal number of iterations reached')
             
         #Estimate failureProbability
-        #self.updateAuxiliaryDistribution(currentAuxiliaryDistributionParameters) #update of auxiliary density 
         y= np.array([self.operator(auxiliaryOutputSample[i][0],self.eventThreshold) for i in range(auxiliaryOutputSample.getSize())]) #find failure points
         indicesCritic=np.where(y==True)[0].tolist() # find failure auxiliaryInputSamples indices
         
@@ -205,56 +255,11 @@ class GenericCrossEntropy(object):
         self.result.setNumberOfSample(iterationNumber*self.numberOfAuxiliaryInputSample)
     
         return None
-
-        
-class CrossEntropyAlgorithmPhysicalSpace(GenericCrossEntropy):
-    """
-    Class for the  Cross Entropy algorithm in the physical space.
-
-
-    Attributes
-    ----------
     
-    :numberOfAuxiliaryInputSample: number of samples of each Cross Entropy iteration (int)
     
-    :maximalIterationNumber: maximal number of iterations for the Cross Entropy (int)
-
-    :event: Threshold event defining the reliability problem (:class:`~openturns.ThresholdEvent`)
     
-    :rhoQuantile: quantile level defining the intermediate thresholds (float)
-    
-    :activeParameters: active parameters of auxiliary distribution (list of booleans)
-    
-    :bounds: :class:`~openturns.Interval` bounds on the parameters of auxiliary distribution to be optimized
-    
-    :auxiliaryDistribution: auxiliary Distribution
-    
-    :initialAuxiliaryDistributionParameters: initial values of auxiliary distribution parameters for optimization
-        
-    """
-    def __init__(self,*args):
-        
-        super().__init__(args)
-
-        self.bounds = args[5] #bounds of the active parameters
-
-        self.auxiliaryDistribution = copy.deepcopy(args[6])
-        self.auxiliaryDistributionOptimization = copy.deepcopy(args[6])
-
-        self.initialAuxiliaryDistributionParameters = args[7] #initial values of the active parameters	
-        self.auxiliaryDistributionParametersDimension = len(self.auxiliaryDistribution.getParameter())#dimension of active parameters
-            
-        #Check of active parameters list validity
-        if len(self.activeParameters )!=len(self.auxiliaryDistribution.getParameter()):
-            raise ValueError('Wrong number of active parameters')
-			
-            #Check of validity of initial theta vector
-            if np.sum(self.activeParameters)!=len(self.initialAuxiliaryDistributionParameters):
-                raise ValueError('Wrong correspondance between the number of active parameters and the given initial vector of parameters')
-
-
     #definition of objective function for Cross entropy
-    def CEobjectiveFunction(self,
+    def CEobjectiveFunctionPhysicalSpace(self,
                             auxiliaryInputSample,
                             auxiliaryOutputSample,
                             currentAuxiliaryDistributionParameters,
@@ -272,7 +277,7 @@ class CrossEntropyAlgorithmPhysicalSpace(GenericCrossEntropy):
             
         """
 
-        self.updateDistribution(currentAuxiliaryDistributionParameters,self.auxiliaryDistributionOptimization) # update of auxiliary distribution
+        self.updateDistributionPhysicalSpace(currentAuxiliaryDistributionParameters,self.auxiliaryDistributionOptimization) # update of auxiliary distribution
         
                 
         y= np.array([self.operator(auxiliaryOutputSample[i,0],eventThresholdLocal[0]) for i in range(auxiliaryOutputSample.getSize())]) #find failure points
@@ -286,7 +291,7 @@ class CrossEntropyAlgorithmPhysicalSpace(GenericCrossEntropy):
         return [f]
 
 
-    def optimizeParameters(self,
+    def optimizeParametersPhysicalSpace(self,
                            auxiliaryInputSample,
                            auxiliaryOutputSample,
                            eventThresholdLocal,
@@ -304,7 +309,7 @@ class CrossEntropyAlgorithmPhysicalSpace(GenericCrossEntropy):
         
         
         """
-        f_opt = lambda theta : self.CEobjectiveFunction(auxiliaryInputSample,
+        f_opt = lambda theta : self.CEobjectiveFunctionPhysicalSpace(auxiliaryInputSample,
                                                         auxiliaryOutputSample,
                                                         theta,
                                                         eventThresholdLocal) #definition of objective function for CE
@@ -329,7 +334,9 @@ class CrossEntropyAlgorithmPhysicalSpace(GenericCrossEntropy):
         
         return currentAuxiliaryDistributionParameters
     
-    def computeOutputSample(self,
+
+    
+    def computeOutputSamplePhysicalSpace(self,
                             inputSample):
         """
         Method to compute the outputSample from the inputSample
@@ -341,22 +348,8 @@ class CrossEntropyAlgorithmPhysicalSpace(GenericCrossEntropy):
         outputSample = self.limitStateFunction(inputSample) #evaluation on limit state function
         return outputSample
     
-    #definition of function that updates the auxiliary distribution based on new theta values
-    def updateAuxiliaryDistribution(self,
-                                    auxiliaryDistributionParameters): 
-        """
-        Method to update the auxiliary distribution from the distribution parameters
-        
-        :auxiliaryDistributionParameters: parameters of auxiliaryDistribution (list of floats)
-        
-        
-        """
-        theta_ = np.array(self.auxiliaryDistribution.getParameter())
-        theta_[self.activeParameters] = auxiliaryDistributionParameters
-        self.auxiliaryDistribution.setParameter(theta_)
-        return None
-
-    def updateDistribution(self,
+    
+    def updateDistributionPhysicalSpace(self,
                            auxiliaryDistributionParameters,
                            distribution): 
         """
@@ -371,44 +364,24 @@ class CrossEntropyAlgorithmPhysicalSpace(GenericCrossEntropy):
         theta_[self.activeParameters] = auxiliaryDistributionParameters
         distribution.setParameter(theta_)
         return None
-
     
     
-# ----------------------------------------------------------------
-class CrossEntropyAlgorithmStandardSpace(GenericCrossEntropy):
-    """
-    Class for the  Cross Entropy algorithm in the standard space.
-
-
-    Attributes
-    ----------
-    
-    :numberOfAuxiliaryInputSample: number of samples of each Cross Entropy iteration (int)
-    
-    :maximalIterationNumber: maximal number of iterations for the Cross Entropy (int)
-
-    :event: Threshold event defining the reliability problem (:class:`~openturns.ThresholdEvent`)
-    
-    :rhoQuantile: quantile level defining the intermediate thresholds (float)
-    
-    :activeParameters: list of two booleans indicating if the mean value (first boolean) and the standard deviation (second boolean) of the auxiliary distribution defined in the standard space have to be optimized
-    
-    :initialAuxiliaryDistributionParameters: initial values of auxiliary distribution parameters for optimization
+    #definition of function that updates the auxiliary distribution based on new theta values
+    def updateAuxiliaryDistributionPhysicalSpace(self,
+                                    auxiliaryDistributionParameters): 
+        """
+        Method to update the auxiliary distribution from the distribution parameters
         
-    """
+        :auxiliaryDistributionParameters: parameters of auxiliaryDistribution (list of floats)
+        
+        
+        """
+        theta_ = np.array(self.auxiliaryDistribution.getParameter())
+        theta_[self.activeParameters] = auxiliaryDistributionParameters
+        self.auxiliaryDistribution.setParameter(theta_)
+        return None
     
-
-    def __init__(self,*args):
-        
-        super().__init__(args)
-        
-        self.inverseIsoprobabilisticTransformation = self.initialDistribution.getInverseIsoProbabilisticTransformation()
-        self.initialDistributionPhysicalSpace = copy.deepcopy(self.initialDistribution)
-        self.initialDistribution = ot.ComposedDistribution([ot.Normal()]*self.sampleDimension)
-        self.auxiliaryDistribution = ot.ComposedDistribution([ot.Normal()]*self.sampleDimension)
-        self.initialAuxiliaryDistributionParameters = args[5]
-        
-    def computeOutputSample(self,
+    def computeOutputSampleStandardSpace(self,
                             inputSample):
         """
         Method to compute the outputSample from the inputSample
@@ -422,7 +395,7 @@ class CrossEntropyAlgorithmStandardSpace(GenericCrossEntropy):
         return outputSample
 
     #definition of function that updates the auxiliary distribution based on new theta values
-    def updateAuxiliaryDistribution(self,
+    def updateAuxiliaryDistributionStandardSpace(self,
                                     auxiliaryDistributionParameters):
         """
         Method to update the auxiliary distribution from the distribution parameters
@@ -431,25 +404,24 @@ class CrossEntropyAlgorithmStandardSpace(GenericCrossEntropy):
         
         """
         
-        if self.activeParameters[0] == True:    
-            theta_ = auxiliaryDistributionParameters[0:self.sampleDimension]
+        
+        j=0
+        
+        aux_param = self.auxiliaryDistribution.getParameter()
+        
+        for i in range(len(aux_param)):
             
-            aux_param = np.array(self.auxiliaryDistribution.getParameter())
-            mask = [True,False]*self.sampleDimension
-            aux_param[mask] = theta_
-            self.auxiliaryDistribution.setParameter(aux_param)
-  
-        if self.activeParameters[1] == True :
-            theta_ = auxiliaryDistributionParameters[self.sampleDimension:]
-            aux_param = np.array(self.auxiliaryDistribution.getParameter())
-            mask = [False,True]*self.sampleDimension
-            aux_param[mask] = theta_
-            self.auxiliaryDistribution.setParameter(aux_param)
+            if self.activeParameters[i]==True:
+                aux_param[i] = auxiliaryDistributionParameters[j]
+                j+=1
+            
+            
+        self.auxiliaryDistribution.setParameter(aux_param)
 
         return None 
             
 
-    def optimizeParameters(self,
+    def optimizeParametersStandardSpace(self,
                            auxiliaryInputSample,
                            auxiliaryOutputSample,
                            eventThresholdLocal,
@@ -468,8 +440,11 @@ class CrossEntropyAlgorithmStandardSpace(GenericCrossEntropy):
         
         """ 
         
-        if self.activeParameters[1] == True and self.activeParameters[0]==False :
-            raise('Error : standard deviations cannot be optimized without means')
+        
+        # check before optimization : impossible to optimize standard deviation without mean
+        for i in range(auxiliaryInputSample.getDimension()):
+            if self.activeParameters[2*i] == False and self.activeParameters[2*i+1]==True:
+                raise('Error : standard deviations cannot be optimized without means')
         
         y = np.array([self.operator(auxiliaryOutputSample[i,0],eventThresholdLocal[0]) for i in range(auxiliaryOutputSample.getSize())]) #find failure points
         indicesCritic=np.where(y==True)[0].tolist()  # find failure auxiliaryInputSamples indices
@@ -479,27 +454,36 @@ class CrossEntropyAlgorithmStandardSpace(GenericCrossEntropy):
         criticSamplesAuxiliaryPDFValue = self.auxiliaryDistribution.computePDF(auxiliaryInputSample_critic)#evaluate auxiliary PDF on failure auxiliaryInputSamples
 
 
-        if self.activeParameters[0] == True : # optimization of mean values
-        
-            denom = np.sum(np.array([criticSamplesInitialPDFValue])/np.array([criticSamplesAuxiliaryPDFValue]))        
-            mu = np.zeros(self.sampleDimension)
+        denom = np.sum(np.array([criticSamplesInitialPDFValue])/np.array([criticSamplesAuxiliaryPDFValue]))        
+        mu_ = np.zeros(self.sampleDimension)
+                
+        for i in range(self.sampleDimension):
+            mu_[i] = np.sum(np.array([criticSamplesInitialPDFValue])/np.array([criticSamplesAuxiliaryPDFValue])*np.array(auxiliaryInputSample_critic[:,i]) )/denom
             
-            for i in range(self.sampleDimension):
-                mu[i] = np.sum(np.array([criticSamplesInitialPDFValue])/np.array([criticSamplesAuxiliaryPDFValue])*np.array(auxiliaryInputSample_critic[:,i]) )/denom
-            if self.activeParameters[1] == True : # optimization of std deviations
+        sigma_ = np.zeros(self.sampleDimension)
             
-                sigma = np.zeros(self.sampleDimension)
-            
-                for i in range(self.sampleDimension):
-                    diff = (np.array(auxiliaryInputSample_critic[:,i]) - mu[i])**2
-                    sigma[i] = np.sqrt(np.sum(np.array([criticSamplesInitialPDFValue])*diff /np.array([criticSamplesAuxiliaryPDFValue]))/denom)
+        for i in range(self.sampleDimension):
+            diff = (np.array(auxiliaryInputSample_critic[:,i]) - mu_[i])**2
+            sigma_[i] = np.sqrt(np.sum(np.array([criticSamplesInitialPDFValue])*diff /np.array([criticSamplesAuxiliaryPDFValue]))/denom)
                          
-                return np.hstack((mu,sigma))
-            else:
-                return mu
-        else:
-            raise('No active parameters have been set')
+        param = []
+        indexMu = 0
+        indexSigma = 0
+        for j in range(len(self.activeParameters)):
             
+            if self.activeParameters[j] == True : # optimization of mean values
+            
+                if j%2==0: # mean value
+                    param.append(mu_[indexMu])
+                    indexMu+=1
+                else : 
+                    param.append(sigma_[indexSigma])
+                    indexSigma+=1
+
+        
+        return param
+    
+    
 if __name__ == "__main__":
     import openturns as ot
 
@@ -518,19 +502,19 @@ if __name__ == "__main__":
     event = ot.ThresholdEvent(G, ot.Less(), -50.0)
     
     # Hyperparameters of the algorithm
-    n_IS= 1000 # Number of samples at each iteration
+    n_IS= 2000 # Number of samples at each iteration
     rho_quantile= 0.15 # Quantile determining the percentage of failure samples in the current population 
     n_iter = 10
     # estimation by CMC 
     #Determination of reference probability
     #MonteCarlo experiment
-    n_MC = 5e6
+    n_MC = 1e5
     
     # create a Monte Carlo algorithm
     experiment = ot.MonteCarloExperiment()
     algo = ot.ProbabilitySimulationAlgorithm(event, experiment)
     algo.setMaximumOuterSampling(int(n_MC))
-    algo.setMaximumCoefficientOfVariation(0.01)
+    algo.setMaximumCoefficientOfVariation(0.1)
     algo.run()
     # retrieve results
     result = algo.getResult()
@@ -544,7 +528,9 @@ if __name__ == "__main__":
     aux_distribution = ot.ComposedDistribution(aux_marginals)
     
     ## Definition of parameters to be optimized
-    active_parameters = [True,True,True,True,True] # active parameters from the auxiliary distribution which will be optimized
+    active_parameters = [0,1,2,3,4] # active parameters from the auxiliary distribution which will be optimized
+    ### WARNING : native parameters of distribution have to be considered
+    
     ### WARNING : native parameters of distribution have to be considered
     
     bounds = ot.Interval([3,0.09,0.,50e3,2e3], # bounds on the active parameters
@@ -553,29 +539,30 @@ if __name__ == "__main__":
     initial_theta= [5.70,0.1,0.,75e3,5e3] # initial value of the active parameters
     
     ## Definition of the algorithm
-    CE_physical = CrossEntropyAlgorithmPhysicalSpace(n_IS,
+    CE_physical = ImportanceSamplingCrossEntropy(n_IS,
                                                       n_iter,
                                                       event,
+                                                      False,
                                                       rho_quantile,
                                                       active_parameters,
+                                                      initial_theta,
                                                       bounds,
-                                                      aux_distribution,
-                                                      initial_theta)
-    
+                                                      aux_distribution)
     # Run of the algorithm
     CE_physical.run()
      
     CE_physicalresults = CE_physical.getResult()
 
     # Cross entropy in standard space   
-    active_parameters = [True,True] # We optimize both means and standard deviations of auxiliary distribution (in standard space)
+    active_parameters = [0,1,2,3] # We optimize both means and standard deviations of auxiliary distribution (in standard space)
         
-    initial_theta= [0.,0.,1.,1.] # initial value of the active parameters
+    initial_theta= [0.,1.,0.,1.] # initial value of the active parameters
 
          ## Definition of the algorithm
-    CE_standard = CrossEntropyAlgorithmStandardSpace(n_IS,
+    CE_standard = ImportanceSamplingCrossEntropy(n_IS,
                                                       n_iter,
                                                       event,
+                                                      True,
                                                       rho_quantile,
                                                       active_parameters,
                                                       initial_theta)
@@ -584,14 +571,14 @@ if __name__ == "__main__":
         
     CE_standardresults = CE_standard.getResult()
     
-    print('         | P estimate |    P ref   |  diff (%)  | Coeff. of var')
-    print('----------------------------------------------------------------')
-    print( 'Standard |',"  %5.2E |   %5.2E |     %2.2f  |         %2.2f"%(CE_standardresults.getProbabilityEstimate(),
+    print('         | P estimate |    P ref   |  diff (%)  | Coeff. of var | Number Samples')
+    print('----------------------------------------------------------------------------')
+    print( 'Standard |',"  %5.2E |   %5.2E |     %2.2f  |         %2.2f |     %d"%(CE_standardresults.getProbabilityEstimate(),
                                                                  probability,
                                                                  (CE_standardresults.getProbabilityEstimate()-probability)/probability*100,
-                                                                 CE_standardresults.getCoefficientOfVariation()))
+                                                                 CE_standardresults.getCoefficientOfVariation(),CE_standardresults.getNumberOfSample()))
 
-    print( 'Physical |',"  %5.2E |   %5.2E |     %2.2f  |         %2.2f"%(CE_physicalresults.getProbabilityEstimate(),
+    print( 'Physical |',"  %5.2E |   %5.2E |     %2.2f   |         %2.2f |     %d"%(CE_physicalresults.getProbabilityEstimate(),
                                                                      probability,
                                                                      (CE_physicalresults.getProbabilityEstimate()-probability)/probability*100,
-                                                                     CE_physicalresults.getCoefficientOfVariation()))
+                                                                     CE_physicalresults.getCoefficientOfVariation(),CE_physicalresults.getNumberOfSample()))
